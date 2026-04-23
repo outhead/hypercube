@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Shape Grid Lab v2</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#000; color:#fff; font-family:system-ui; overflow:hidden; }
+  canvas { display:block; }
+  #controls {
+    position:fixed; top:10px; left:10px; z-index:10;
+    background:rgba(0,0,0,0.8); padding:12px; border-radius:8px;
+    font-size:12px; min-width:200px;
+  }
+  select, input { margin:4px 0; display:block; width:100%; }
+  label { display:block; margin-top:6px; color:#888; font-size:10px; }
+  #info { position:fixed; bottom:10px; left:10px; color:#555; font-size:10px; }
+</style>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.172.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.172.0/examples/jsm/"}}
+</script>
+</head>
+<body>
+<div id="controls">
+  <b style="color:#d49c4d">Shape Grid Lab v2</b>
+  <label>Shape</label>
+  <select id="shape">
+    <option value="cube" selected>Cube</option>
+    <option value="octahedron">Octahedron</option>
+    <option value="icosahedron">Icosahedron</option>
+    <option value="dodecahedron">Dodecahedron</option>
+  </select>
+  <label>Grid Mode</label>
+  <select id="gridMode">
+    <option value="original" selected>Original cube grid</option>
+    <option value="lattice">Lattice</option>
+  </select>
+  <label>Cell Scale <span id="vCell">1.0</span></label>
+  <input type="range" id="cellScale" min="0.3" max="4.0" step="0.1" value="1.0">
+  <label>ETA (IOR) <span id="vEta">1.75</span></label>
+  <input type="range" id="eta" min="1" max="4" step="0.05" value="1.75">
+  <label>Glow <span id="vGlow">0.64</span></label>
+  <input type="range" id="glow" min="0.1" max="1" step="0.01" value="0.64">
+  <label>Edge width <span id="vEdge">0.025</span></label>
+  <input type="range" id="edge" min="0.005" max="0.1" step="0.001" value="0.025">
+  <label>Complexity <span id="vComplexity">1.0</span></label>
+  <input type="range" id="complexity" min="0" max="1" step="0.01" value="1">
+  <label>Scale <span id="vScale">3</span></label>
+  <input type="range" id="scale" min="1" max="6" step="0.1" value="3">
+  <hr style="border-color:#333;margin:8px 0">
+  <b style="color:#888;font-size:9px">EDGES</b>
+  <label>Edge threshold <span id="vEdgeThresh">0.004</span></label>
+  <input type="range" id="edgeThresh" min="0" max="0.03" step="0.001" value="0.004">
+  <label>Edge brightness <span id="vEdgeBright">1.0</span></label>
+  <input type="range" id="edgeBright" min="0" max="1" step="0.05" value="1.0">
+  <label>Lines per axis <span id="vLinesPerAxis">5</span></label>
+  <input type="range" id="linesPerAxis" min="1" max="9" step="1" value="5">
+  <div id="status" style="color:#d49c4d;margin-top:8px;font-size:10px;"></div>
+</div>
+<div id="info">Drag to rotate. Scroll to zoom.</div>
+<canvas id="c"></canvas>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const canvas = document.getElementById('c');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111111);
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 0, 5);
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.65;
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+
+// === Shape definitions ===
+// Each shape: apothem, faceNormals (unique pairs), SDF + intersection + normal, edge detection
+const SHAPES = {
+  cube: {
+    apothem: 0.5,
+    faceNormals: [[1,0,0],[0,1,0],[0,0,1]],
+    sdf: `
+      float shapeSDF(vec3 p) {
+        vec3 d = abs(p) - vec3(0.45) + 0.05;
+        return length(max(d,0.0)) - 0.05 + min(max(d.x,max(d.y,d.z)),0.0);
+      }
+      float shapeIntersect(vec3 ro, vec3 rd) {
+        vec3 m=1.0/rd; vec3 n=m*ro; vec3 k=abs(m)*(vec3(0.45)+0.05);
+        vec3 t1=-n-k; vec3 t2=-n+k;
+        float tN=max(max(t1.x,t1.y),t1.z); float tF=min(min(t2.x,t2.y),t2.z);
+        if(tN>tF||tF<0.0) return -1.0; return tN;
+      }
+      vec3 shapeNormal(vec3 p) {
+        return sign(p)*normalize(max(abs(p)-vec3(0.45),0.0));
+      }
+    `,
+    edgeDetect: `
+      float edgeDetect(vec3 p) {
+        vec3 pc = p + 0.5;
+        int ec = 0;
+        if (pc.x <= glowWidth || pc.x >= 1.0-glowWidth) ec++;
+        if (pc.y <= glowWidth || pc.y >= 1.0-glowWidth) ec++;
+        if (pc.z <= glowWidth || pc.z >= 1.0-glowWidth) ec++;
+        return ec >= 2 ? 1.0 : 0.0;
+      }
+    `,
+  },
+  octahedron: {
+    apothem: 0.26,
+    faceNormals: [[1,1,1],[1,1,-1],[1,-1,1],[-1,1,1]],
+    sdf: `
+      #define ROUND 0.03
+      float shapeSDF(vec3 p) {
+        // Rounded octahedron: sharp SDF - radius (Minkowski with sphere)
+        vec3 a=abs(p); return (a.x+a.y+a.z-(0.45-ROUND*1.732))*0.577 - ROUND;
+      }
+      float shapeIntersect(vec3 ro, vec3 rd) {
+        float t=0.0;
+        for(int i=0;i<128;i++){float d=shapeSDF(ro+rd*t);if(d<0.0002)return t;if(t>5.0)break;t+=d*0.8;}
+        return -1.0;
+      }
+      vec3 shapeNormal(vec3 p) {
+        vec2 e=vec2(0.0002,0.0);
+        return normalize(vec3(shapeSDF(p+e.xyy)-shapeSDF(p-e.xyy),shapeSDF(p+e.yxy)-shapeSDF(p-e.yxy),shapeSDF(p+e.yyx)-shapeSDF(p-e.yyx)));
+      }
+    `,
+    edgeDetect: `
+      float edgeDetect(vec3 p) {
+        vec3 n0=normalize(vec3(1,1,1)), n1=normalize(vec3(1,1,-1)),
+             n2=normalize(vec3(1,-1,1)), n3=normalize(vec3(-1,1,1));
+        float d0=abs(dot(p,n0)),d1=abs(dot(p,n1)),d2=abs(dot(p,n2)),d3=abs(dot(p,n3));
+        float mx=max(max(d0,d1),max(d2,d3));
+        float mx2=0.0;
+        if(d0<mx&&d0>mx2) mx2=d0; if(d1<mx&&d1>mx2) mx2=d1;
+        if(d2<mx&&d2>mx2) mx2=d2; if(d3<mx&&d3>mx2) mx2=d3;
+        return (mx-mx2) < edgeThreshold ? 1.0 : 0.0;
+      }
+    `,
+  },
+  icosahedron: {
+    apothem: 0.35,
+    // Grid uses octahedral lattice (4 axes) → clean triangular pattern
+    // SDF uses all 10 normals → correct icosahedron shape
+    faceNormals: [[1,1,1],[1,1,-1],[1,-1,1],[-1,1,1]],
+    sdf: `
+      #define ROUND 0.025
+      float shapeSDF(vec3 p) {
+        float PHI=1.618033988749895; float IP=0.618033988749895; float d=0.0;
+        d=max(d,abs(dot(p,normalize(vec3(1,1,1)))));
+        d=max(d,abs(dot(p,normalize(vec3(1,1,-1)))));
+        d=max(d,abs(dot(p,normalize(vec3(1,-1,1)))));
+        d=max(d,abs(dot(p,normalize(vec3(-1,1,1)))));
+        d=max(d,abs(dot(p,normalize(vec3(0,IP,PHI)))));
+        d=max(d,abs(dot(p,normalize(vec3(0,IP,-PHI)))));
+        d=max(d,abs(dot(p,normalize(vec3(IP,PHI,0)))));
+        d=max(d,abs(dot(p,normalize(vec3(IP,-PHI,0)))));
+        d=max(d,abs(dot(p,normalize(vec3(PHI,0,IP)))));
+        d=max(d,abs(dot(p,normalize(vec3(PHI,0,-IP)))));
+        return d-(0.35-ROUND) - ROUND;
+      }
+      float shapeIntersect(vec3 ro, vec3 rd) {
+        float t=0.0;
+        for(int i=0;i<128;i++){float d=shapeSDF(ro+rd*t);if(d<0.0002)return t;if(t>5.0)break;t+=d*0.8;}
+        return -1.0;
+      }
+      vec3 shapeNormal(vec3 p) {
+        vec2 e=vec2(0.0002,0.0);
+        return normalize(vec3(shapeSDF(p+e.xyy)-shapeSDF(p-e.xyy),shapeSDF(p+e.yxy)-shapeSDF(p-e.yxy),shapeSDF(p+e.yyx)-shapeSDF(p-e.yyx)));
+      }
+    `,
+    edgeDetect: `
+      float edgeDetect(vec3 p) {
+        float PHI=1.618033988749895; float IP=0.618033988749895;
+        vec3 ns[10];
+        ns[0]=normalize(vec3(1,1,1));ns[1]=normalize(vec3(1,1,-1));
+        ns[2]=normalize(vec3(1,-1,1));ns[3]=normalize(vec3(-1,1,1));
+        ns[4]=normalize(vec3(0,IP,PHI));ns[5]=normalize(vec3(0,IP,-PHI));
+        ns[6]=normalize(vec3(IP,PHI,0));ns[7]=normalize(vec3(IP,-PHI,0));
+        ns[8]=normalize(vec3(PHI,0,IP));ns[9]=normalize(vec3(PHI,0,-IP));
+        float mx=0.0, mx2=0.0;
+        for(int i=0;i<10;i++){
+          float d=abs(dot(p,ns[i]));
+          if(d>mx){mx2=mx;mx=d;}else if(d>mx2){mx2=d;}
+        }
+        return (mx-mx2) < edgeThreshold ? 1.0 : 0.0;
+      }
+    `,
+  },
+  dodecahedron: {
+    apothem: 0.38,
+    faceNormals: [[0,1,1.618],[0,-1,1.618],[1.618,0,1],[-1.618,0,1],[1,1.618,0],[-1,1.618,0]],
+    sdf: `
+      #define ROUND 0.025
+      float shapeSDF(vec3 p) {
+        float PHI=1.618033988749895; float d=0.0;
+        d=max(d,abs(dot(p,normalize(vec3(0,1,PHI)))));
+        d=max(d,abs(dot(p,normalize(vec3(0,-1,PHI)))));
+        d=max(d,abs(dot(p,normalize(vec3(PHI,0,1)))));
+        d=max(d,abs(dot(p,normalize(vec3(-PHI,0,1)))));
+        d=max(d,abs(dot(p,normalize(vec3(1,PHI,0)))));
+        d=max(d,abs(dot(p,normalize(vec3(-1,PHI,0)))));
+        return d-(0.38-ROUND) - ROUND;
+      }
+      float shapeIntersect(vec3 ro, vec3 rd) {
+        float t=0.0;
+        for(int i=0;i<128;i++){float d=shapeSDF(ro+rd*t);if(d<0.0002)return t;if(t>5.0)break;t+=d*0.8;}
+        return -1.0;
+      }
+      vec3 shapeNormal(vec3 p) {
+        vec2 e=vec2(0.0002,0.0);
+        return normalize(vec3(shapeSDF(p+e.xyy)-shapeSDF(p-e.xyy),shapeSDF(p+e.yxy)-shapeSDF(p-e.yxy),shapeSDF(p+e.yyx)-shapeSDF(p-e.yyx)));
+      }
+    `,
+    edgeDetect: `
+      float edgeDetect(vec3 p) {
+        float PHI=1.618033988749895;
+        vec3 ns[6];
+        ns[0]=normalize(vec3(0,1,PHI));ns[1]=normalize(vec3(0,-1,PHI));
+        ns[2]=normalize(vec3(PHI,0,1));ns[3]=normalize(vec3(-PHI,0,1));
+        ns[4]=normalize(vec3(1,PHI,0));ns[5]=normalize(vec3(-1,PHI,0));
+        float mx=0.0, mx2=0.0;
+        for(int i=0;i<6;i++){
+          float d=abs(dot(p,ns[i]));
+          if(d>mx){mx2=mx;mx=d;}else if(d>mx2){mx2=d;}
+        }
+        return (mx-mx2) < edgeThreshold ? 1.0 : 0.0;
+      }
+    `,
+  },
+};
+
+// === Build lattice grid GLSL ===
+// All axes always active (no rotation discontinuity).
+// linesPerAxis controls how many other-axis checks per stepping axis:
+//   2 = cube-like density, K-1 = full lattice
+function buildLatticeGrid(shape, mode, maxAxes, linesPerAxis) {
+  const normals = shape.faceNormals;
+  const Kfull = normals.length;
+  const K = Math.min(Kfull, maxAxes || Kfull);
+  const h = shape.apothem;
+
+  const norms = normals.map(([x,y,z]) => {
+    const l = Math.sqrt(x*x+y*y+z*z);
+    return [x/l, y/l, z/l];
+  });
+
+  // For each axis, sort other axes by perpendicularity (smallest |dot| first)
+  const sortedOthers = [];
+  for (let i = 0; i < K; i++) {
+    const dots = [];
+    for (let j = 0; j < K; j++) {
+      if (j === i) continue;
+      const d = Math.abs(norms[i][0]*norms[j][0] + norms[i][1]*norms[j][1] + norms[i][2]*norms[j][2]);
+      dots.push({j, d});
+    }
+    dots.sort((a,b) => a.d - b.d);
+    sortedOthers[i] = dots.map(d => d.j);
+  }
+
+  let code = '';
+
+  for (let i = 0; i < K; i++) {
+    const [nx,ny,nz] = norms[i];
+    code += `const vec3 LN${i} = vec3(${nx.toFixed(8)}, ${ny.toFixed(8)}, ${nz.toFixed(8)});\n`;
+  }
+
+  // Generate plane-stepping code for one axis
+  function genAxisTrace(axisIdx, otherAxes, vp) {
+    let c = `
+        float rdN_${vp} = dot(rd, LN${axisIdx}) * sc;
+        if (abs(rdN_${vp}) > 0.001) {
+          float roN_${vp} = dot(ro, LN${axisIdx}) * sc;
+          float sz_${vp} = rdN_${vp} < 0.0 ? -1.0 : 1.0;
+          float d_${vp} = (glowWidth - 0.5 - roN_${vp} * sz_${vp}) / (rdN_${vp} * sz_${vp});
+          if (d_${vp} < 0.0) {\n`;
+    // Init other-axis coordinates and step sizes at first hit
+    for (const j of otherAxes) {
+      c += `            float ${vp}_o${j} = dot(ro, LN${j}) * sc + dot(rd, LN${j}) * sc * d_${vp} + 0.5;\n`;
+      c += `            float ${vp}_s${j} = -dot(rd, LN${j}) * sc / (rdN_${vp} * sz_${vp});\n`;
+    }
+    c += `            for (float ${vp}_i = 0.0; ${vp}_i < STEPS; ${vp}_i++) {\n`;
+    // Find min distance to boundary across all other axes
+    c += `              float ${vp}_minD = 1.0;\n`;
+    for (const j of otherAxes) {
+      c += `              { float fv = fract(${vp}_o${j}); ${vp}_minD = min(${vp}_minD, min(fv, 1.0-fv)); }\n`;
+    }
+    // Hit if any other axis is near integer boundary
+    c += `              if (${vp}_minD <= glowWidth) {\n`;
+    // Depth: Chebyshev distance
+    c += `                float ${vp}_mc = 0.0;\n`;
+    for (const j of otherAxes) {
+      c += `                ${vp}_mc = max(${vp}_mc, abs(floor(${vp}_o${j})));\n`;
+    }
+    c += `                float ${vp}_v = ${vp}_mc + ${vp}_i;\n`;
+    // Cube-quality glow profile: frame → SDF → pow(p,4)
+    c += `                float ${vp}_maxF = 0.0;\n`;
+    c += `                float ${vp}_sdf = -1.0;\n`;
+    for (const j of otherAxes) {
+      c += `                { float uv_${j} = fract(${vp}_o${j});\n`;
+      c += `                  float frame_${j} = abs(uv_${j} - 0.5) - 0.5 + glowWidth;\n`;
+      c += `                  ${vp}_sdf = max(${vp}_sdf, frame_${j});\n`;
+      c += `                  float f_${j} = 1.0 - 2.0 * abs(uv_${j} - 0.5);\n`;
+      c += `                  ${vp}_maxF = max(${vp}_maxF, f_${j}); }\n`;
+    }
+    c += `                float ${vp}_s = max(${vp}_sdf, 0.0) / glowWidth;\n`;
+    c += `                ${vp}_s *= ${vp}_s;\n`;
+    c += `                float ${vp}_p = 3.0 - 2.0 * ${vp}_maxF;\n`;
+    c += `                ${vp}_p = pow(${vp}_p, 4.0);\n`;
+    c += `                ${vp}_p *= ${vp}_s * ${vp}_s;\n`;
+    c += `                ${vp}_p = max(${vp}_p, 0.0);\n`;
+    c += `                ${vp}_p = mix(1.0, ${vp}_p, complexity);\n`;
+    c += `                if (${vp}_v < bestV) { bestV = ${vp}_v; bestP = ${vp}_p; }\n`;
+    c += `                break;\n`;
+    c += `              }\n`;
+    // Step to next plane
+    for (const j of otherAxes) {
+      c += `              ${vp}_o${j} += ${vp}_s${j};\n`;
+    }
+    c += `            }\n`;
+    c += `          }\n`;
+    c += `        }\n`;
+    return c;
+  }
+
+  code += `
+    vec3 latticeGrid(vec3 ro, vec3 rd) {
+      float sc = 0.5 / (${h.toFixed(6)} * cellScale);
+      float bestV = 20.0;
+      float bestP = 0.0;\n`;
+
+  // Trace ALL K axes, each checking linesPerAxis most-perpendicular others
+  const lpa = Math.min(linesPerAxis || 2, K - 1);
+  for (let i = 0; i < K; i++) {
+    const others = sortedOthers[i].slice(0, lpa);
+    code += `      // === Axis ${i} (${others.length} checks) ===\n      {\n`;
+    code += genAxisTrace(i, others, `a${i}`);
+    code += `      }\n`;
+  }
+
+  code += `
+      return vec3(bestV, 0.0, bestP);
+    }`;
+
+  return code;
+}
+
+// Cube SDF grid — infinite parallel-plane lattice (Chebyshev depth metric)
+const ORIGINAL_CUBE_GRID = `
+  vec3 infiniteGrid(vec3 ro, vec3 rd) {
+    vec3 ird = 1.0/rd;
+    float bestV = 20.0;
+    float bestP = 0.0;
+    for(int axis=0; axis<3; axis++){
+      vec3 ro2 = axis==0 ? ro.zyx : (axis==1 ? ro.xzy : ro);
+      vec3 rd2 = axis==0 ? rd.zyx : (axis==1 ? rd.xzy : rd);
+      vec3 ird2 = axis==0 ? ird.zyx : (axis==1 ? ird.xzy : ird);
+      float sz = rd2.z < 0.0 ? -1.0 : 1.0;
+      float d = (glowWidth - 0.5 - ro2.z * sz) * ird2.z * sz;
+      if(d < 0.0){
+        vec2 xy = ro2.xy + rd2.xy * d + 0.5;
+        for(float i=0.0; i<STEPS; i++){
+          vec2 uv = fract(xy);
+          float osg = 1.0 - glowWidth;
+          if(uv.x<=glowWidth || uv.x>=osg || uv.y<=glowWidth || uv.y>=osg){
+            vec2 xyi = abs(floor(xy));
+            float v = max(xyi.x, xyi.y) + i;
+            vec2 frame = abs(uv - 0.5) - 0.5 + glowWidth;
+            float s = length(max(frame, 0.0)) + min(max(frame.x, frame.y), 0.0);
+            s = s / glowWidth; s *= s;
+            vec2 f = 1.0 - 2.0 * abs(uv - 0.5);
+            float p = 3.0 - 2.0 * max(f.x, f.y);
+            p = pow(p, 4.0); p *= s * s; p = max(p, 0.0);
+            p = mix(1.0, p, complexity);
+            if(v < bestV){ bestV = v; bestP = p; }
+            break;
+          }
+          xy -= rd2.xy * ird2.z * sz;
+        }
+      }
+    }
+    return vec3(bestV, 0.0, bestP);
+  }`;
+
+// Build fragment shader
+function buildShader(shapeName, gridMode, linesPerAxis) {
+  const shape = SHAPES[shapeName];
+
+  // Use original cube grid for 'original' mode, lattice for others
+  const useOriginal = (gridMode === 'original');
+  const gridFunc = useOriginal ? ORIGINAL_CUBE_GRID : buildLatticeGrid(shape, 'all', null, linesPerAxis || 2);
+  const gridCallName = useOriginal ? 'infiniteGrid' : 'latticeGrid';
+
+  return `
+    precision highp float;
+    varying vec3 vPos;
+    uniform vec3 cam;
+    uniform float eta;
+    uniform float glow;
+    uniform float glowWidth;
+    uniform vec3 lightColor;
+    uniform float complexity;
+    uniform float envIntensity;
+    uniform float cellScale;
+    uniform float edgeThreshold;
+    uniform float edgeBrightness;
+    uniform mat4 lightMatrix;
+    uniform mat4 modelMatrix;
+
+    #define SIZE vec3(0.45)
+    #define RAD 0.05
+    #define STEPS 16.0
+
+    ${shape.sdf}
+    ${shape.edgeDetect}
+
+    ${gridFunc}
+
+    float fresnel(vec3 rd, vec3 n) {
+      return pow(1.0 - abs(dot(rd, n)), 3.0);
+    }
+
+    vec3 getEnv(vec3 ro, vec3 rd) {
+      vec3 ori = (lightMatrix * modelMatrix * vec4(ro, 1.0)).xyz;
+      vec3 dir = (lightMatrix * modelMatrix * vec4(rd, 0.0)).xyz;
+      vec3 c = vec3(0.0);
+      float d = -ori.z / dir.z;
+      if (d > 0.0) {
+        vec2 p = ori.xy + dir.xy * d;
+        p = 1.0 - p * p;
+        float l = step(0.0, p.x) * step(0.0, p.y);
+        l *= 1.0 - 0.8 * p.x * p.y;
+        c += l * envIntensity;
+      }
+      c += mix(vec3(0.01), vec3(0.05, 0.04, 0.03), rd.y * 0.5 + 0.5);
+      return c;
+    }
+
+    void main() {
+      vec3 rd = normalize(vPos - cam);
+      float d = shapeIntersect(cam, rd);
+      if (d < 0.0) { discard; return; }
+
+      vec3 hitPos = cam + rd * d;
+      vec3 nor = shapeNormal(hitPos);
+
+      vec3 color = getEnv(hitPos, reflect(rd, nor)) * fresnel(rd, nor);
+
+      float cosI = dot(rd, nor);
+      float k = cosI * cosI + eta * eta - 1.0;
+      if (k >= 0.0) {
+        vec3 refDir = normalize(nor * (sqrt(k) + cosI) - rd);
+        float power = 1.0 - fresnel(refDir, -nor);
+
+        float edge = edgeDetect(hitPos);
+        vec3 f = ${gridCallName}(hitPos, refDir);
+        float gridVal = pow(glow, f.x) * f.z;
+        if (edge > 0.5 && edgeBrightness > 0.0) {
+          color += mix(gridVal, 1.0, edgeBrightness) * power * lightColor;
+        } else {
+          color += gridVal * power * lightColor;
+        }
+      }
+
+      color = max(vec3(0.0), color + (fract(sin(dot(vPos.xy, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) / 255.0);
+      gl_FragColor = vec4(color, 1.0);
+    }
+  `;
+}
+
+// === Scene ===
+const geo = new THREE.BoxGeometry(1.1, 1.1, 1.1);
+const mat = new THREE.ShaderMaterial({
+  uniforms: {
+    cam: {value: new THREE.Vector3()},
+    eta: {value: 1.75},
+    glow: {value: 0.64},
+    glowWidth: {value: 0.025},
+    lightColor: {value: new THREE.Color(0xd49c4d)},
+    complexity: {value: 1.0},
+    envIntensity: {value: 5.0},
+    cellScale: {value: 1.0},
+    edgeThreshold: {value: 0.004},
+    edgeBrightness: {value: 1.0},
+    lightMatrix: {value: new THREE.Matrix4()},
+  },
+  vertexShader: `varying vec3 vPos; void main(){vPos=position;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
+  fragmentShader: buildShader('cube', 'original'),
+  side: THREE.FrontSide,
+});
+const mesh = new THREE.Mesh(geo, mat);
+mesh.scale.setScalar(3);
+scene.add(mesh);
+
+const lo = new THREE.Object3D();
+lo.position.set(0,0,3); lo.lookAt(0,0,0); lo.scale.set(10,2,1);
+lo.updateMatrixWorld();
+mat.uniforms.lightMatrix.value.copy(lo.matrixWorld).invert();
+
+// === Controls ===
+function recompile() {
+  const shapeName = document.getElementById('shape').value;
+  const gridMode = document.getElementById('gridMode').value;
+  const linesPerAxis = +document.getElementById('linesPerAxis').value;
+  try {
+    mat.fragmentShader = buildShader(shapeName, gridMode, linesPerAxis);
+    mat.needsUpdate = true;
+    document.getElementById('status').textContent = 'OK: ' + shapeName + ' / ' + gridMode;
+    document.getElementById('status').style.color = '#4a4';
+  } catch(e) {
+    document.getElementById('status').textContent = 'ERROR: ' + e.message;
+    document.getElementById('status').style.color = '#a44';
+    console.error(e);
+  }
+}
+
+document.getElementById('shape').onchange = () => {
+  const s = document.getElementById('shape').value;
+  const gm = document.getElementById('gridMode');
+  // Auto-select best mode: original for cube, lattice for others
+  gm.value = (s === 'cube') ? 'original' : 'lattice';
+  recompile();
+};
+document.getElementById('gridMode').onchange = recompile;
+document.getElementById('eta').oninput = e => { mat.uniforms.eta.value = +e.target.value; document.getElementById('vEta').textContent = e.target.value; };
+document.getElementById('glow').oninput = e => { mat.uniforms.glow.value = +e.target.value; document.getElementById('vGlow').textContent = e.target.value; };
+document.getElementById('edge').oninput = e => { mat.uniforms.glowWidth.value = +e.target.value; document.getElementById('vEdge').textContent = e.target.value; };
+document.getElementById('complexity').oninput = e => { mat.uniforms.complexity.value = +e.target.value; document.getElementById('vComplexity').textContent = e.target.value; };
+document.getElementById('cellScale').oninput = e => { mat.uniforms.cellScale.value = +e.target.value; document.getElementById('vCell').textContent = e.target.value; };
+document.getElementById('scale').oninput = e => { mesh.scale.setScalar(+e.target.value); document.getElementById('vScale').textContent = e.target.value; };
+document.getElementById('edgeThresh').oninput = e => { mat.uniforms.edgeThreshold.value = +e.target.value; document.getElementById('vEdgeThresh').textContent = e.target.value; };
+document.getElementById('edgeBright').oninput = e => { mat.uniforms.edgeBrightness.value = +e.target.value; document.getElementById('vEdgeBright').textContent = e.target.value; };
+document.getElementById('linesPerAxis').oninput = e => { document.getElementById('vLinesPerAxis').textContent = e.target.value; recompile(); };
+
+// === Animate ===
+const _invQuat = new THREE.Quaternion();
+const _camLocal = new THREE.Vector3();
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  _invQuat.copy(mesh.quaternion).conjugate();
+  _camLocal.copy(camera.position).sub(mesh.position).divideScalar(mesh.scale.x).applyQuaternion(_invQuat);
+  mat.uniforms.cam.value.copy(_camLocal);
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
