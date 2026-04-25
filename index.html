@@ -1717,18 +1717,12 @@
       if (meta.defaultSize !== undefined) config.object.shapeSize = meta.defaultSize;
       if (meta.defaultRound !== undefined) config.object.shapeRound = meta.defaultRound;
     }
-    // Also snap shape-wide defaults to meta when available — keeps each shape's
-    // canonical glow/scale/eta/bloom tuning rather than inheriting the previous shape's.
-    if (meta) {
-      if (meta.glow !== undefined) config.object.glow = meta.glow;
-      if (meta.complexity !== undefined) config.object.complexity = meta.complexity;
-      if (meta.eta !== undefined) config.object.eta = meta.eta;
-      if (meta.scale !== undefined) config.object.scale = meta.scale;
-      if (meta.bloom) {
-        config.bloom.exposure = meta.bloom.exposure;
-        config.bloom.strength = meta.bloom.strength;
-      }
-    }
+    // Inheritance: glow/complexity/eta/scale/bloom (and all aesthetic config —
+    // lightColor, iridescence, aurora, fov, etc.) are NOT reset on shape switch.
+    // Whatever the user has tuned for the current shape carries over to the next
+    // one, so changes propagate naturally instead of snapping back to per-shape
+    // SHAPE_META defaults. SHAPE_META still seeds the initial boot (via
+    // _applyInitialShapeMetaBoot) for the page-load shape only.
     // Clear any stale Play overrides so uniforms track meta values
     delete config.object._glowWidthOverride;
     delete config.object._fresnelOverride;
